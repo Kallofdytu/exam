@@ -1,22 +1,187 @@
 from rest_framework import viewsets, status, filters, generics
 from rest_framework.views import APIView
 from rest_framework.response import Response
+from django.contrib.auth import authenticate
 from rest_framework.decorators import api_view
 from django.db import transaction
 from django_filters.rest_framework import DjangoFilterBackend
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.generics import GenericAPIView
+
 from .models import (
     CustomerProfile, Wallet, BankCard, Transaction,
     PaymentCategory, ServiceProvider, Payment,
-    FavoritePayment, Notification
+    FavoritePayment, Notification, User
 )
 from .serializers import (
     CustomerProfileSerializer, WalletSerializer, BankCardSerializer,
     TransactionSerializer, PaymentCategorySerializer, ServiceProviderSerializer,
     PaymentSerializer, FavoritePaymentSerializer, NotificationSerializer,
-    TopUpSerializer, TransferSerializer
+    TopUpSerializer, TransferSerializer, RegisterSerializer, LoginSerializer,
+    UserShortSerializer
 )
 
-# 1. FBV барои PaymentCategory (Мувофиқи Day 1)
+class RegisterAPIView(GenericAPIView):
+    serializer_class = RegisterSerializer
+
+    def post(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response({"message": "Корбар бомуваффақият сохта шуд!"}, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+class LoginAPIView(GenericAPIView):
+    serializer_class = LoginSerializer
+
+    def post(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        if serializer.is_valid():
+            user = authenticate(
+                username=serializer.validated_data['username'],
+                password=serializer.validated_data['password']
+            )
+            if user:
+                return Response({
+                    "message": "Хуш омадед!",
+                    "user": UserShortSerializer(user).data
+                })
+            return Response({"error": "Логин ё парол хатост"}, status=status.HTTP_401_UNAUTHORIZED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class CustomerProfileViewSet(viewsets.ModelViewSet):
+    queryset = CustomerProfile.objects.all()
+    serializer_class = CustomerProfileSerializer
+
+class WalletViewSet(viewsets.ModelViewSet):
+    serializer_class = WalletSerializer
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ['status', 'currency']
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return Wallet.objects.filter(user=self.request.user)
+
+    def perform_create(self, serializer):
+        serializer.save(user=self.request.user)
+
+class BankCardViewSet(viewsets.ModelViewSet):
+    queryset = BankCard.objects.all()
+    serializer_class = BankCardSerializer
+    filter_backends = [filters.SearchFilter]
+    search_fields = ['masked_pan', 'card_holder']
+
+class ServiceProviderViewSet(viewsets.ModelViewSet):
+    queryset = ServiceProvider.objects.all()
+    serializer_class = ServiceProviderSerializer
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter]
+    filterset_fields = ['category', 'is_active']
+    search_fields = ['name']
+
+class FavoritePaymentViewSet(viewsets.ModelViewSet):
+    queryset = FavoritePayment.objects.all()
+    serializer_class = FavoritePaymentSerializer
+
+class NotificationViewSet(viewsets.ModelViewSet):
+    queryset = Notification.objects.all()
+    serializer_class = NotificationSerializer
+
+
+class TopUpAPIView(GenericAPIView):
+    serializer_class = TopUpSerializer
+
+    def post(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        if serializer.is_valid():
+            wallet_id = serializer.validated_data['wallet_id']
+            amount = serializer.validated_data['amount']
+            
+            with transaction.atomic():
+                wallet = Wallet.objects.select_for_update().get(pk=wallet_id)
+                wallet.balance += amount
+                wallet.save()
+
+                new_trans = Transaction.objects.create(
+                    receiver_wallet=wallet,
+                    transaction_type='TOP_UP',
+                    amount=amount,
+                    total_amount=amount,
+                    currency=wallet.currency,
+                    status='SUCCESS',
+                    description=serializer.validated_data.get('description', '')
+                )
+                return Response(TransactionSerializer(new_trans).data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+class TransferAPIView(GenericAPIView):
+    serializer_class = TransferSerializer
+
+    def post(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        if serializer.is_valid():
+            s_id = serializer.validated_data['sender_wallet_id']
+            r_num = serializer.validated_data['receiver_wallet_number']
+            amount = serializer.validated_data['amount']
+
+            with transaction.atomic():
+                try:
+                    sender = Wallet.objects.select_for_update().get(pk=s_id)
+                    receiver = Wallet.objects.select_for_update().get(wallet_number=r_num)
+                except Wallet.DoesNotExist:
+                    return Response({'error': 'Ҳамён ёфт нашуд'}, status=status.HTTP_404_NOT_FOUND)
+
+                if sender.balance < amount:
+                    return Response({'error': 'Маблағи нокофӣ'}, status=status.HTTP_400_BAD_REQUEST)
+
+                sender.balance -= amount
+                receiver.balance += amount
+                sender.save()
+                receiver.save()
+
+                new_trans = Transaction.objects.create(
+                    sender_wallet=sender,
+                    receiver_wallet=receiver,
+                    transaction_type='TRANSFER',
+                    amount=amount,
+                    total_amount=amount,
+                    currency=sender.currency,
+                    status='SUCCESS',
+                    description=serializer.validated_data.get('description', '')
+                )
+                return Response(TransactionSerializer(new_trans).data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class TransactionListAPIView(generics.ListAPIView):
+    queryset = Transaction.objects.all()
+    serializer_class = TransactionSerializer
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter]
+    filterset_fields = ['status', 'transaction_type']
+    search_fields = ['description']
+
+class PaymentListCreateAPIView(generics.ListCreateAPIView):
+    queryset = Payment.objects.all()
+    serializer_class = PaymentSerializer
+
+    def perform_create(self, serializer):
+        with transaction.atomic():
+            wallet = Wallet.objects.select_for_update().get(pk=self.request.data['wallet_id'])
+            amount = serializer.validated_data['amount']
+            
+            wallet.balance -= amount
+            wallet.save()
+            
+            trans = Transaction.objects.create(
+                sender_wallet=wallet,
+                transaction_type='PAYMENT',
+                amount=amount,
+                total_amount=amount,
+                currency=wallet.currency,
+                status='SUCCESS'
+            )
+            serializer.save(transaction=trans, status='SUCCESS', user=self.request.user)
+
 @api_view(['GET', 'POST'])
 def payment_category_list(request):
     if request.method == 'GET':
@@ -50,129 +215,6 @@ def payment_category_detail(request, pk):
         category.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
-# 2. ViewSets барои CRUD-и стандартӣ (Day 3)
-class CustomerProfileViewSet(viewsets.ModelViewSet):
-    queryset = CustomerProfile.objects.all()
-    serializer_class = CustomerProfileSerializer
-
-class WalletViewSet(viewsets.ModelViewSet):
-    queryset = Wallet.objects.all()
-    serializer_class = WalletSerializer
-    filter_backends = [DjangoFilterBackend]
-    filterset_fields = ['status', 'currency']
-
-class BankCardViewSet(viewsets.ModelViewSet):
-    queryset = BankCard.objects.all()
-    serializer_class = BankCardSerializer
-    filter_backends = [filters.SearchFilter]
-    search_fields = ['masked_pan', 'card_holder']
-
-class ServiceProviderViewSet(viewsets.ModelViewSet):
-    queryset = ServiceProvider.objects.all()
-    serializer_class = ServiceProviderSerializer
-    filter_backends = [DjangoFilterBackend, filters.SearchFilter]
-    filterset_fields = ['category', 'is_active']
-    search_fields = ['name']
-
-class FavoritePaymentViewSet(viewsets.ModelViewSet):
-    queryset = FavoritePayment.objects.all()
-    serializer_class = FavoritePaymentSerializer
-
-class NotificationViewSet(viewsets.ModelViewSet):
-    queryset = Notification.objects.all()
-    serializer_class = NotificationSerializer
-
-# 3. APIView барои Logic-и махсус (TopUp ва Transfer)
-class TopUpAPIView(APIView):
-    serializer_class = TopUpSerializer  
-    def post(self, request):
-        serializer = TopUpSerializer(data=request.data)
-        if serializer.is_valid():
-            wallet_id = serializer.validated_data['wallet_id']
-            amount = serializer.validated_data['amount']
-            
-            with transaction.atomic():
-                wallet = Wallet.objects.select_for_update().get(pk=wallet_id)
-                wallet.balance += amount
-                wallet.save()
-
-                new_trans = Transaction.objects.create(
-                    receiver_wallet=wallet,
-                    transaction_type='TOP_UP',
-                    amount=amount,
-                    total_amount=amount,
-                    currency=wallet.currency,
-                    status='SUCCESS',
-                    description=serializer.validated_data.get('description', '')
-                )
-                return Response(TransactionSerializer(new_trans).data, status=status.HTTP_201_CREATED)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-class TransferAPIView(APIView):
-    serializer_class = TransferSerializer
-    def post(self, request):
-        serializer = TransferSerializer(data=request.data)
-        if serializer.is_valid():
-            s_id = serializer.validated_data['sender_wallet_id']
-            r_num = serializer.validated_data['receiver_wallet_number']
-            amount = serializer.validated_data['amount']
-
-            with transaction.atomic():
-                sender = Wallet.objects.select_for_update().get(pk=s_id)
-                receiver = Wallet.objects.select_for_update().get(wallet_number=r_num)
-
-                if sender.balance < amount:
-                    return Response({'error': 'Insufficient balance'}, status=status.HTTP_400_BAD_REQUEST)
-
-                sender.balance -= amount
-                receiver.balance += amount
-                sender.save()
-                receiver.save()
-
-                new_trans = Transaction.objects.create(
-                    sender_wallet=sender,
-                    receiver_wallet=receiver,
-                    transaction_type='TRANSFER',
-                    amount=amount,
-                    total_amount=amount,
-                    currency=sender.currency,
-                    status='SUCCESS',
-                    description=serializer.validated_data.get('description', '')
-                )
-                return Response(TransactionSerializer(new_trans).data, status=status.HTTP_201_CREATED)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-# 4. GenericAPIView барои Payments ва Transactions List
-class TransactionListAPIView(generics.ListAPIView):
-    queryset = Transaction.objects.all()
-    serializer_class = TransactionSerializer
-    filter_backends = [DjangoFilterBackend, filters.SearchFilter]
-    filterset_fields = ['status', 'transaction_type']
-    search_fields = ['description']
-
-class PaymentListCreateAPIView(generics.ListCreateAPIView):
-    queryset = Payment.objects.all()
-    serializer_class = PaymentSerializer
-
-    def perform_create(self, serializer):
-        with transaction.atomic():
-            wallet = Wallet.objects.select_for_update().get(pk=self.request.data['wallet_id'])
-            amount = serializer.validated_data['amount']
-            
-            wallet.balance -= amount
-            wallet.save()
-            
-            trans = Transaction.objects.create(
-                sender_wallet=wallet,
-                transaction_type='PAYMENT',
-                amount=amount,
-                total_amount=amount,
-                currency=wallet.currency,
-                status='SUCCESS'
-            )
-            serializer.save(transaction=trans, status='SUCCESS')
-
-# 5. Нотификатсияро хондашуда кардан
 class MarkNotificationReadAPIView(APIView):
     def patch(self, request, pk):
         try:

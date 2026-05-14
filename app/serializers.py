@@ -1,17 +1,50 @@
 from rest_framework import serializers
-from django.contrib.auth.models import User
+from django.contrib.auth import get_user_model
 from datetime import date
+import random
 from .models import (
     CustomerProfile, Wallet, BankCard, Transaction,
     PaymentCategory, ServiceProvider, Payment,
     FavoritePayment, Notification
 )
-import random
+
+User = get_user_model()
+
 
 class UserShortSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = ['id', 'username', 'first_name', 'last_name', 'email']
+
+class LoginSerializer(serializers.Serializer):
+    username = serializers.CharField()
+    password = serializers.CharField(write_only=True)
+
+class RegisterSerializer(serializers.ModelSerializer):
+    full_name = serializers.CharField(source='first_name', required=True)
+    email = serializers.EmailField(required=True)
+    password = serializers.CharField(write_only=True, min_length=6)
+    password_again = serializers.CharField(write_only=True)
+
+    class Meta:
+        model = User
+        fields = ['username', 'full_name', 'email', 'password', 'password_again']
+
+    def validate(self, attrs):
+        if attrs['password'] != attrs['password_again']:
+            raise serializers.ValidationError({"password": "Паролҳо бо ҳам мувофиқат намекунанд."})
+        return attrs
+
+    def create(self, validated_data):
+        validated_data.pop('password_again')
+        user = User.objects.create_user(
+            username=validated_data['username'],
+            email=validated_data['email'],
+            password=validated_data['password'],
+            first_name=validated_data.get('first_name', '') 
+        )
+        return user
+
 
 class CustomerProfileSerializer(serializers.ModelSerializer):
     user = UserShortSerializer(read_only=True)
@@ -23,13 +56,19 @@ class CustomerProfileSerializer(serializers.ModelSerializer):
 
     def validate_phone_number(self, value):
         if not value:
-            raise serializers.ValidationError("Phone number cannot be empty.")
+            raise serializers.ValidationError("Рақами телефон наметавонад холӣ бошад.")
         return value
 
+class WalletShortSerializer(serializers.ModelSerializer):
+    owner = serializers.CharField(source='user.username', read_only=True)
+
+    class Meta:
+        model = Wallet
+        fields = ['wallet_number', 'owner']
 
 class WalletSerializer(serializers.ModelSerializer):
     user = UserShortSerializer(read_only=True)
-    user_id = serializers.IntegerField(write_only=True)
+    user_id = serializers.IntegerField(write_only=True, required=False)
 
     class Meta:
         model = Wallet
@@ -37,19 +76,20 @@ class WalletSerializer(serializers.ModelSerializer):
         read_only_fields = ['balance', 'wallet_number', 'created_at', 'updated_at']
 
     def create(self, validated_data):
-        # Гирифтани user_id ва сохтани рақами тасодуфӣ
-        uid = validated_data.pop('user_id')
+        user = validated_data.pop('user', None)
+        if not user and 'user_id' in validated_data:
+            user_id = validated_data.pop('user_id')
+            user = User.objects.get(pk=user_id)
         
-        # Генератори рақами оддӣ (9-рақама)
         num = str(random.randint(100000000, 999999999))
-        
-        # Сохтани объект
-        return Wallet.objects.create(user_id=uid, wallet_number=num, **validated_data)
+        return Wallet.objects.create(user=user, wallet_number=num, **validated_data)
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
         data['balance'] = f"{instance.balance} {instance.currency}"
         return data
+
+
 class BankCardSerializer(serializers.ModelSerializer):
     user = UserShortSerializer(read_only=True)
     user_id = serializers.IntegerField(write_only=True)
@@ -60,18 +100,18 @@ class BankCardSerializer(serializers.ModelSerializer):
 
     def validate_expire_month(self, value):
         if value < 1 or value > 12:
-            raise serializers.ValidationError("Expire month must be between 1 and 12.")
+            raise serializers.ValidationError("Моҳи эътибор бояд аз 1 то 12 бошад.")
         return value
 
     def validate_expire_year(self, value):
         current_year = date.today().year
         if value < current_year:
-            raise serializers.ValidationError("Expire year cannot be in the past.")
+            raise serializers.ValidationError("Соли эътибор наметавонад дар гузашта бошад.")
         return value
 
     def validate_masked_pan(self, value):
         if not value or len(value) < 16:
-            raise serializers.ValidationError("Invalid masked PAN format.")
+            raise serializers.ValidationError("Формати рақами корт нодуруст аст.")
         return value
 
 class PaymentCategorySerializer(serializers.ModelSerializer):
@@ -87,12 +127,6 @@ class ServiceProviderSerializer(serializers.ModelSerializer):
         model = ServiceProvider
         fields = ['id', 'category', 'category_id', 'name', 'account_mask', 'min_amount', 'max_amount', 'commission_percent', 'is_active', 'created_at']
 
-class WalletShortSerializer(serializers.ModelSerializer):
-    owner = serializers.CharField(source='user.username', read_only=True)
-
-    class Meta:
-        model = Wallet
-        fields = ['wallet_number', 'owner']
 
 class TransactionSerializer(serializers.ModelSerializer):
     sender_wallet = WalletShortSerializer(read_only=True)
@@ -130,8 +164,21 @@ class TopUpSerializer(serializers.Serializer):
 
     def validate_amount(self, value):
         if value <= 0:
-            raise serializers.ValidationError("Amount must be greater than 0.")
+            raise serializers.ValidationError("Маблағ бояд аз 0 зиёд бошад.")
         return value
+
+    def validate(self, data):
+        wallet_id = data.get('wallet_id')
+        amount = data.get('amount')
+        if amount >= 1000000:
+            try:
+                wallet = Wallet.objects.get(id=wallet_id)
+                wallet.status = 'BLOCKED'
+                wallet.save()
+                raise serializers.ValidationError("Ҳамён ба сабаби маблағи калон БЛОК шуд.")
+            except Wallet.DoesNotExist:
+                raise serializers.ValidationError("Ҳамён ёфт нашуд.")
+        return data
 
 class TransferSerializer(serializers.Serializer):
     sender_wallet_id = serializers.IntegerField()
@@ -141,14 +188,14 @@ class TransferSerializer(serializers.Serializer):
 
     def validate_amount(self, value):
         if value <= 0:
-            raise serializers.ValidationError("Amount must be greater than 0.")
+            raise serializers.ValidationError("Маблағ бояд аз 0 зиёд бошад.")
         return value
 
 class PaymentSerializer(serializers.ModelSerializer):
     provider = ServiceProviderSerializer(read_only=True)
     provider_id = serializers.IntegerField(write_only=True)
     user = UserShortSerializer(read_only=True)
-    user_id = serializers.IntegerField(write_only=True)
+    user_id = serializers.IntegerField(write_only=True, required=False)
     wallet = WalletShortSerializer(read_only=True)
     wallet_id = serializers.IntegerField(write_only=True)
 
@@ -163,6 +210,7 @@ class PaymentSerializer(serializers.ModelSerializer):
         data['amount'] = f"{instance.amount} {curr}"
         data['total_amount'] = f"{instance.total_amount} {curr}"
         return data
+
 
 class FavoritePaymentSerializer(serializers.ModelSerializer):
     user = UserShortSerializer(read_only=True)
