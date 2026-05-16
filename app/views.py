@@ -5,8 +5,9 @@ from django.contrib.auth import authenticate
 from rest_framework.decorators import api_view
 from django.db import transaction
 from django_filters.rest_framework import DjangoFilterBackend
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.generics import GenericAPIView
+from rest_framework.authtoken.models import Token
 
 from .models import (
     CustomerProfile, Wallet, BankCard, Transaction,
@@ -21,38 +22,41 @@ from .serializers import (
     UserShortSerializer
 )
 
-class RegisterAPIView(GenericAPIView):
-    serializer_class = RegisterSerializer
 
-    def post(self, request, *args, **kwargs):
-        serializer = self.get_serializer(data=request.data)
-        if serializer.is_valid():
-            serializer.save()
-            return Response({"message": "Корбар бомуваффақият сохта шуд!"}, status=status.HTTP_201_CREATED)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+class RegisterAPIView(generics.CreateAPIView):
+    serializer_class = RegisterSerializer
+    permission_classes = [AllowAny]
+
 
 class LoginAPIView(GenericAPIView):
     serializer_class = LoginSerializer
+    permission_classes = [AllowAny]
 
-    def post(self, request, *args, **kwargs):
-        serializer = self.get_serializer(data=request.data)
-        if serializer.is_valid():
-            user = authenticate(
-                username=serializer.validated_data['username'],
-                password=serializer.validated_data['password']
-            )
-            if user:
-                return Response({
-                    "message": "Хуш омадед!",
-                    "user": UserShortSerializer(user).data
-                })
-            return Response({"error": "Логин ё парол хатост"}, status=status.HTTP_401_UNAUTHORIZED)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    def post(self, request):
+        username = request.data.get('username')
+        password = request.data.get('password')
+        user = authenticate(username=username, password=password)
 
+        if user:
+            token, created = Token.objects.get_or_create(user=user)
+            return Response({
+                "token": token.key,
+                "user": UserShortSerializer(user).data
+            }, status=status.HTTP_200_OK)
+
+        return Response({"error": "Логин ё парол хатост!"}, status=status.HTTP_401_UNAUTHORIZED)
+
+class LogoutAPIView(GenericAPIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        request.user.auth_token.delete()
+        return Response({"message": "Шумо баромадед!"}, status=status.HTTP_200_OK)
 
 class CustomerProfileViewSet(viewsets.ModelViewSet):
     queryset = CustomerProfile.objects.all()
     serializer_class = CustomerProfileSerializer
+
 
 class WalletViewSet(viewsets.ModelViewSet):
     serializer_class = WalletSerializer
@@ -66,11 +70,13 @@ class WalletViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         serializer.save(user=self.request.user)
 
+
 class BankCardViewSet(viewsets.ModelViewSet):
     queryset = BankCard.objects.all()
     serializer_class = BankCardSerializer
     filter_backends = [filters.SearchFilter]
     search_fields = ['masked_pan', 'card_holder']
+
 
 class ServiceProviderViewSet(viewsets.ModelViewSet):
     queryset = ServiceProvider.objects.all()
@@ -79,9 +85,11 @@ class ServiceProviderViewSet(viewsets.ModelViewSet):
     filterset_fields = ['category', 'is_active']
     search_fields = ['name']
 
+
 class FavoritePaymentViewSet(viewsets.ModelViewSet):
     queryset = FavoritePayment.objects.all()
     serializer_class = FavoritePaymentSerializer
+
 
 class NotificationViewSet(viewsets.ModelViewSet):
     queryset = Notification.objects.all()
@@ -96,7 +104,7 @@ class TopUpAPIView(GenericAPIView):
         if serializer.is_valid():
             wallet_id = serializer.validated_data['wallet_id']
             amount = serializer.validated_data['amount']
-            
+
             with transaction.atomic():
                 wallet = Wallet.objects.select_for_update().get(pk=wallet_id)
                 wallet.balance += amount
@@ -113,6 +121,7 @@ class TopUpAPIView(GenericAPIView):
                 )
                 return Response(TransactionSerializer(new_trans).data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
 
 class TransferAPIView(GenericAPIView):
     serializer_class = TransferSerializer
@@ -160,6 +169,7 @@ class TransactionListAPIView(generics.ListAPIView):
     filterset_fields = ['status', 'transaction_type']
     search_fields = ['description']
 
+
 class PaymentListCreateAPIView(generics.ListCreateAPIView):
     queryset = Payment.objects.all()
     serializer_class = PaymentSerializer
@@ -168,10 +178,10 @@ class PaymentListCreateAPIView(generics.ListCreateAPIView):
         with transaction.atomic():
             wallet = Wallet.objects.select_for_update().get(pk=self.request.data['wallet_id'])
             amount = serializer.validated_data['amount']
-            
+
             wallet.balance -= amount
             wallet.save()
-            
+
             trans = Transaction.objects.create(
                 sender_wallet=wallet,
                 transaction_type='PAYMENT',
@@ -181,6 +191,7 @@ class PaymentListCreateAPIView(generics.ListCreateAPIView):
                 status='SUCCESS'
             )
             serializer.save(transaction=trans, status='SUCCESS', user=self.request.user)
+
 
 @api_view(['GET', 'POST'])
 def payment_category_list(request):
@@ -194,6 +205,7 @@ def payment_category_list(request):
             serializer.save()
             return Response(serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
 
 @api_view(['GET', 'PATCH', 'DELETE'])
 def payment_category_detail(request, pk):
@@ -214,6 +226,7 @@ def payment_category_detail(request, pk):
     elif request.method == 'DELETE':
         category.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
 
 class MarkNotificationReadAPIView(APIView):
     def patch(self, request, pk):

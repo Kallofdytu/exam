@@ -6,7 +6,7 @@ from .views import (
     payment_category_list, payment_category_detail,
     TopUpAPIView, TransferAPIView, TransactionListAPIView,
     PaymentListCreateAPIView, MarkNotificationReadAPIView,
-    RegisterAPIView, LoginAPIView
+    RegisterAPIView, LoginAPIView, LogoutAPIView
 )
 
 router = DefaultRouter()
@@ -19,18 +19,14 @@ router.register(r'notifications', NotificationViewSet, basename='notification')
 
 urlpatterns = [
     path('', include(router.urls)),
-
-    path('auth/register/', RegisterAPIView.as_view(), name='auth_register'),
-    path('auth/login/', LoginAPIView.as_view(), name='auth_login'),
-
+    path('register/', RegisterAPIView.as_view(), name='register'),
+    path('login/', LoginAPIView.as_view(), name='login'),
+    path('logout/', LogoutAPIView.as_view(), name='logout'),
     path('payment-categories/', payment_category_list, name='category_list'),
     path('payment-categories/<int:pk>/', payment_category_detail, name='category_detail'),
-
     path('transactions/', TransactionListAPIView.as_view(), name='transaction_list'),
     path('transactions/top-up/', TopUpAPIView.as_view(), name='transaction_topup'),
     path('transactions/transfer/', TransferAPIView.as_view(), name='transaction_transfer'),
-
     path('payments/', PaymentListCreateAPIView.as_view(), name='payment_list_create'),
-
     path('notifications/<int:pk>/mark-as-read/', MarkNotificationReadAPIView.as_view(), name='notification_mark_read'),
 ]

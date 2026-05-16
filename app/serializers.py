@@ -16,34 +16,26 @@ class UserShortSerializer(serializers.ModelSerializer):
         model = User
         fields = ['id', 'username', 'first_name', 'last_name', 'email']
 
-class LoginSerializer(serializers.Serializer):
-    username = serializers.CharField()
-    password = serializers.CharField(write_only=True)
 
 class RegisterSerializer(serializers.ModelSerializer):
-    full_name = serializers.CharField(source='first_name', required=True)
-    email = serializers.EmailField(required=True)
-    password = serializers.CharField(write_only=True, min_length=6)
-    password_again = serializers.CharField(write_only=True)
+    password = serializers.CharField(write_only=True)
 
     class Meta:
         model = User
-        fields = ['username', 'full_name', 'email', 'password', 'password_again']
-
-    def validate(self, attrs):
-        if attrs['password'] != attrs['password_again']:
-            raise serializers.ValidationError({"password": "Паролҳо бо ҳам мувофиқат намекунанд."})
-        return attrs
+        fields = ['username', 'password', 'email']
 
     def create(self, validated_data):
-        validated_data.pop('password_again')
         user = User.objects.create_user(
             username=validated_data['username'],
-            email=validated_data['email'],
             password=validated_data['password'],
-            first_name=validated_data.get('first_name', '') 
+            email=validated_data.get('email', '')
         )
         return user
+
+
+class LoginSerializer(serializers.Serializer):
+    username = serializers.CharField()
+    password = serializers.CharField()
 
 
 class CustomerProfileSerializer(serializers.ModelSerializer):
@@ -59,12 +51,14 @@ class CustomerProfileSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Рақами телефон наметавонад холӣ бошад.")
         return value
 
+
 class WalletShortSerializer(serializers.ModelSerializer):
     owner = serializers.CharField(source='user.username', read_only=True)
 
     class Meta:
         model = Wallet
         fields = ['wallet_number', 'owner']
+
 
 class WalletSerializer(serializers.ModelSerializer):
     user = UserShortSerializer(read_only=True)
@@ -80,7 +74,7 @@ class WalletSerializer(serializers.ModelSerializer):
         if not user and 'user_id' in validated_data:
             user_id = validated_data.pop('user_id')
             user = User.objects.get(pk=user_id)
-        
+
         num = str(random.randint(100000000, 999999999))
         return Wallet.objects.create(user=user, wallet_number=num, **validated_data)
 
@@ -114,10 +108,12 @@ class BankCardSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Формати рақами корт нодуруст аст.")
         return value
 
+
 class PaymentCategorySerializer(serializers.ModelSerializer):
     class Meta:
         model = PaymentCategory
         fields = ['id', 'name', 'description', 'is_active', 'created_at']
+
 
 class ServiceProviderSerializer(serializers.ModelSerializer):
     category = PaymentCategorySerializer(read_only=True)
@@ -157,6 +153,7 @@ class TransactionSerializer(serializers.ModelSerializer):
         data['total_amount'] = f"{instance.total_amount} {instance.currency}"
         return data
 
+
 class TopUpSerializer(serializers.Serializer):
     wallet_id = serializers.IntegerField()
     amount = serializers.DecimalField(max_digits=12, decimal_places=2)
@@ -180,6 +177,7 @@ class TopUpSerializer(serializers.Serializer):
                 raise serializers.ValidationError("Ҳамён ёфт нашуд.")
         return data
 
+
 class TransferSerializer(serializers.Serializer):
     sender_wallet_id = serializers.IntegerField()
     receiver_wallet_number = serializers.CharField()
@@ -190,6 +188,7 @@ class TransferSerializer(serializers.Serializer):
         if value <= 0:
             raise serializers.ValidationError("Маблағ бояд аз 0 зиёд бошад.")
         return value
+
 
 class PaymentSerializer(serializers.ModelSerializer):
     provider = ServiceProviderSerializer(read_only=True)
@@ -221,6 +220,7 @@ class FavoritePaymentSerializer(serializers.ModelSerializer):
     class Meta:
         model = FavoritePayment
         fields = ['id', 'user', 'user_id', 'provider', 'provider_id', 'title', 'account_number', 'created_at']
+
 
 class NotificationSerializer(serializers.ModelSerializer):
     user = UserShortSerializer(read_only=True)
